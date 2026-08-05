@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>k6 Dynamic Test Runner</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header class="app-header">
+  <h1>k6 Dynamic Test Runner</h1>
+  <span class="subtitle">Configure, run, and inspect k6 load tests</span>
+</header>
+
+<main class="layout">
+  <section class="panel config-panel">
+    <h2>Configuration</h2>
+
+    <label>Test type
+      <select id="testType">
+        <option value="smoke">Smoke</option>
+        <option value="load" selected>Load</option>
+        <option value="stress">Stress</option>
+        <option value="spike">Spike</option>
+        <option value="soak">Soak</option>
+        <option value="custom">Custom</option>
+      </select>
+    </label>
+    <p id="testTypeDesc" class="hint"></p>
+
+    <label>Target base URL
+      <input id="target" type="text" placeholder="https://your-api.example.com" required />
+    </label>
+
+    <fieldset>
+      <legend>Traffic profile</legend>
+      <label class="inline">
+        <input type="radio" name="mode" value="stages" checked /> Stages (ramp up/down)
+      </label>
+      <label class="inline">
+        <input type="radio" name="mode" value="constant" /> Constant (VUs + duration)
+      </label>
+
+      <div id="stagesEditor" class="rows"></div>
+      <button type="button" id="addStage" class="btn-secondary small">+ Add stage</button>
+
+      <div id="constantEditor" class="rows hidden">
+        <div class="row">
+          <label>VUs <input id="vus" type="number" min="1" value="1" /></label>
+          <label>Duration <input id="duration" type="text" value="1m" /></label>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Thresholds</legend>
+      <div class="row">
+        <label>p95 latency (ms) <input id="thP95" type="number" placeholder="300" /></label>
+        <label>Max fail rate (0-1) <input id="thFailRate" type="number" step="0.01" placeholder="0.05" /></label>
+        <label>Min requests <input id="thMinReq" type="number" placeholder="" /></label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Think time between iterations (s)</legend>
+      <div class="row">
+        <label>Min <input id="sleepMin" type="number" step="0.1" value="1" /></label>
+        <label>Max <input id="sleepMax" type="number" step="0.1" value="2" /></label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Authentication</legend>
+      <label>Auth mode
+        <select id="authType">
+          <option value="none" selected>None</option>
+          <option value="static">Static header (API key / fixed Bearer token)</option>
+          <option value="basic">Basic auth (username + password)</option>
+          <option value="login">Login first (session cookie and/or token)</option>
+        </select>
+      </label>
+
+      <div id="authStatic" class="rows hidden">
+        <div class="row">
+          <label>Header name <input id="authHeaderName" type="text" value="Authorization" /></label>
+          <label>Header value <input id="authHeaderValue" type="text" placeholder="Bearer eyJhbGciOi..." /></label>
+        </div>
+      </div>
+
+      <div id="authBasic" class="rows hidden">
+        <div class="row">
+          <label>Username <input id="authUser" type="text" /></label>
+          <label>Password <input id="authPass" type="password" /></label>
+        </div>
+      </div>
+
+      <div id="authLogin" class="rows hidden">
+        <p class="hint">Runs once per virtual user before its first request. k6 keeps a per-VU cookie jar, so a PHP session cookie (e.g. PHPSESSID) set by this call is automatically resent on every later request — just like a browser. If the login response also returns a JSON token, fill in the token field below to attach it as a header on every request too.</p>
+        <div class="row">
+          <label>Method
+            <select id="authLoginMethod">
+              <option selected>POST</option>
+              <option>GET</option>
+            </select>
+          </label>
+          <label>Login path <input id="authLoginPath" type="text" placeholder="/login.php" /></label>
+        </div>
+        <label>Login body (JSON)
+          <textarea id="authLoginBody" rows="2" placeholder='{"username":"demo","password":"demo123"}'></textarea>
+        </label>
+        <div class="row">
+          <label>Token JSON field (optional) <input id="authTokenField" type="text" placeholder="token — leave blank for cookie-only session" /></label>
+          <label>Header name for token <input id="authLoginHeaderName" type="text" value="Authorization" /></label>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Extra headers (sent on every request)</legend>
+      <div id="headersEditor" class="rows"></div>
+      <button type="button" id="addHeader" class="btn-secondary small">+ Add header</button>
+    </fieldset>
+
+    <fieldset>
+      <legend>Requests (executed in order, each iteration)</legend>
+      <div id="requestsEditor" class="rows"></div>
+      <button type="button" id="addRequest" class="btn-secondary small">+ Add request</button>
+    </fieldset>
+
+    <div class="actions">
+      <button type="button" id="previewBtn" class="btn-secondary">Preview script</button>
+      <button type="button" id="runBtn" class="btn-primary">Run test</button>
+      <button type="button" id="stopBtn" class="btn-danger hidden">Stop</button>
+    </div>
+  </section>
+
+  <section class="panel output-panel">
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="script">Script</button>
+      <button class="tab-btn" data-tab="log">Live log</button>
+      <button class="tab-btn" data-tab="results">Results</button>
+    </div>
+
+    <div id="tab-script" class="tab-content active">
+      <div id="profileChart" class="chart-wrap hidden"></div>
+      <pre id="scriptPreview" class="code-block">// Click "Preview script" or "Run test" to generate k6 code.</pre>
+    </div>
+
+    <div id="tab-log" class="tab-content">
+      <div id="runStatus" class="status"></div>
+      <pre id="logConsole" class="code-block log-console"></pre>
+    </div>
+
+    <div id="tab-results" class="tab-content">
+      <div class="results-toolbar">
+        <button type="button" id="copyResultsBtn" class="btn-secondary small hidden">Copy result</button>
+      </div>
+      <div id="resultsSummary" class="results-summary">
+        <p class="hint">Results appear here after a run finishes.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
