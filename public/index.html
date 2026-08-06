@@ -3,12 +3,12 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>k6 Dynamic Test Runner</title>
+<title>Askfor Test Runner</title>
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 <header class="app-header">
-  <h1>k6 Dynamic Test Runner</h1>
+  <h1>Askfor Test Runner</h1>
   <span class="subtitle">Configure, run, and inspect k6 load tests</span>
 </header>
 
@@ -148,6 +148,10 @@
 
     <div id="tab-log" class="tab-content">
       <div id="runStatus" class="status"></div>
+      <div id="runProgress" class="progress-wrap hidden">
+        <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+        <div id="progressLabel" class="progress-label"></div>
+      </div>
       <pre id="logConsole" class="code-block log-console"></pre>
     </div>
 
