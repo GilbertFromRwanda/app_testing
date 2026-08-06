@@ -237,6 +237,16 @@ function formatSeconds(s) {
   return out;
 }
 
+// Picks the most readable unit for a millisecond duration: ms under 1s,
+// seconds (with decimals) under a minute, then combined m/h via formatSeconds.
+function formatMsDuration(ms) {
+  if (!Number.isFinite(ms)) return String(ms);
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(s < 10 ? 2 : 1)} s`;
+  return formatSeconds(s);
+}
+
 // Builds the piecewise-linear VU-over-time profile k6 will actually run:
 // ramping-vus stages interpolate linearly between targets starting at 0;
 // a constant-vus test holds flat at `vus` for the whole duration.
@@ -408,10 +418,60 @@ el('previewBtn').addEventListener('click', async () => {
   switchTab('script');
 });
 
+// ---------- Progress bar ----------
+// k6 doesn't stream progress when stdout isn't a TTY (which it never is here),
+// so we estimate progress from wall-clock time against the planned test
+// duration we already compute for the load-profile chart.
+let progressTimer = null;
+
+function stopProgressTimer() {
+  if (progressTimer) {
+    clearInterval(progressTimer);
+    progressTimer = null;
+  }
+}
+
+function startProgress(totalSeconds) {
+  stopProgressTimer();
+  const wrap = el('runProgress');
+  const fill = el('progressFill');
+  const label = el('progressLabel');
+  wrap.classList.remove('hidden');
+
+  if (!totalSeconds || !Number.isFinite(totalSeconds) || totalSeconds <= 0) {
+    wrap.classList.add('indeterminate');
+    label.innerHTML = '<span>Running…</span><span></span>';
+    return;
+  }
+
+  wrap.classList.remove('indeterminate');
+  const startedAt = Date.now();
+
+  const tick = () => {
+    const elapsed = (Date.now() - startedAt) / 1000;
+    const pct = Math.min(99, (elapsed / totalSeconds) * 100);
+    fill.style.width = `${pct.toFixed(1)}%`;
+    label.innerHTML = `<span>${formatSeconds(elapsed)} / ~${formatSeconds(totalSeconds)}</span><span>${Math.round(pct)}%</span>`;
+  };
+  tick();
+  progressTimer = setInterval(tick, 300);
+}
+
+function finishProgress(success) {
+  stopProgressTimer();
+  const wrap = el('runProgress');
+  wrap.classList.remove('indeterminate');
+  el('progressFill').style.width = '100%';
+  const label = el('progressLabel');
+  const prev = label.querySelector('span')?.textContent || '';
+  label.innerHTML = `<span>${prev}</span><span>${success ? '100%' : 'stopped'}</span>`;
+}
+
 // ---------- Run ----------
 el('runBtn').addEventListener('click', async () => {
   if (!requireTarget()) return;
-  renderProfileChart(collectConfig());
+  const config = collectConfig();
+  renderProfileChart(config);
   if (currentEventSource) currentEventSource.close();
 
   el('logConsole').textContent = '';
@@ -419,11 +479,12 @@ el('runBtn').addEventListener('click', async () => {
   const statusEl = el('runStatus');
   statusEl.textContent = 'Starting…';
   statusEl.className = 'status running';
+  el('runProgress').classList.add('hidden');
 
   const res = await fetch('/api/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(collectConfig()),
+    body: JSON.stringify(config),
   });
   const data = await res.json();
   if (!res.ok) {
@@ -437,6 +498,10 @@ el('runBtn').addEventListener('click', async () => {
   switchTab('log');
   el('runBtn').classList.add('hidden');
   el('stopBtn').classList.remove('hidden');
+
+  statusEl.textContent = 'Running…';
+  const { totalSeconds } = buildProfilePoints(config);
+  startProgress(totalSeconds);
 
   const es = new EventSource(`/api/run/${data.runId}/stream`);
   currentEventSource = es;
@@ -454,6 +519,7 @@ el('runBtn').addEventListener('click', async () => {
     el('stopBtn').classList.add('hidden');
 
     const passed = payload.code === 0;
+    finishProgress(passed);
     statusEl.textContent = passed ? 'Finished — thresholds passed' : `Finished — exit code ${payload.code} (check thresholds/errors)`;
     statusEl.className = `status ${passed ? 'done-pass' : 'done-fail'}`;
 
@@ -462,6 +528,7 @@ el('runBtn').addEventListener('click', async () => {
   });
 
   es.onerror = () => {
+    stopProgressTimer();
     statusEl.textContent = 'Connection to test runner lost.';
     statusEl.className = 'status done-fail';
     el('runBtn').classList.remove('hidden');
@@ -531,6 +598,96 @@ function collectThresholds(summary) {
   return rows;
 }
 
+// Builds a horizontal bar chart of the http_req_duration percentiles/stats
+// (min/avg/med/p90/p95/max), scaled against the largest value present.
+function buildDurationChart(metrics) {
+  const m = metrics.http_req_duration;
+  if (!m || typeof m !== 'object') return null;
+
+  const rows = [
+    ['min', 'Min'],
+    ['avg', 'Avg'],
+    ['med', 'Median'],
+    ['p(90)', 'p90'],
+    ['p(95)', 'p95'],
+    ['max', 'Max'],
+  ].filter(([key]) => m[key] !== undefined);
+  if (!rows.length) return null;
+
+  const maxVal = Math.max(...rows.map(([key]) => m[key])) || 1;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'duration-chart';
+  wrap.innerHTML = `<p class="chart-title">Response time (ms)</p>`;
+  for (const [key, label] of rows) {
+    const val = m[key];
+    const pct = Math.max(2, (val / maxVal) * 100);
+    const row = document.createElement('div');
+    row.className = 'duration-row';
+    row.innerHTML = `
+      <span class="duration-label">${label}</span>
+      <div class="duration-track"><div class="duration-fill" style="width:${pct.toFixed(1)}%"></div></div>
+      <span class="duration-val">${formatMsDuration(val)}</span>
+    `;
+    wrap.appendChild(row);
+  }
+  return wrap;
+}
+
+function buildDonutCard(pct, title, colorVar) {
+  if (pct == null || !Number.isFinite(pct)) return null;
+  const card = document.createElement('div');
+  card.className = 'donut-card';
+  card.innerHTML = `
+    <div class="donut" style="--pct:${pct.toFixed(1)}%; --donut-color:var(${colorVar});">
+      <div class="donut-hole"><div class="donut-value">${pct.toFixed(1)}%</div></div>
+    </div>
+    <div class="donut-title">${title}</div>
+  `;
+  return card;
+}
+
+// checks and http_req_failed are both pass/fail rates, shown as donuts.
+function buildDonutGroup(metrics) {
+  const group = document.createElement('div');
+  group.className = 'donut-group';
+
+  const checks = metrics.checks;
+  if (checks && typeof checks === 'object') {
+    const total = (checks.passes || 0) + (checks.fails || 0);
+    if (total) {
+      const card = buildDonutCard((checks.passes / total) * 100, 'Checks passed', '--accent-2');
+      if (card) group.appendChild(card);
+    }
+  }
+
+  const failed = metrics.http_req_failed;
+  if (failed && typeof failed === 'object') {
+    // k6 quirk: on http_req_failed, "passes" counts requests flagged as failed.
+    const failedCount = failed.passes || 0;
+    const total = failedCount + (failed.fails || 0);
+    if (total) {
+      const card = buildDonutCard(((total - failedCount) / total) * 100, 'Requests OK', '--accent-2');
+      if (card) group.appendChild(card);
+    }
+  }
+
+  return group.children.length ? group : null;
+}
+
+function buildResultsCharts(summary) {
+  const metrics = summary.metrics || {};
+  const durationChart = buildDurationChart(metrics);
+  const donutGroup = buildDonutGroup(metrics);
+  if (!durationChart && !donutGroup) return null;
+
+  const row = document.createElement('div');
+  row.className = 'results-charts';
+  if (durationChart) row.appendChild(durationChart);
+  if (donutGroup) row.appendChild(donutGroup);
+  return row;
+}
+
 let lastSummary = null;
 
 function renderResults(summary) {
@@ -565,6 +722,9 @@ function renderResults(summary) {
     }
     container.appendChild(list);
   }
+
+  const charts = buildResultsCharts(summary);
+  if (charts) container.appendChild(charts);
 
   const grid = document.createElement('div');
   grid.className = 'metric-grid';
