@@ -1,0 +1,13 @@
+name: gil-testing
+
+services:
+  gil-testing:
+    build: .
+    container_name: gil-testing
+    ports:
+      - "4600:4600"
+    environment:
+      - PORT=4600
+    volumes:
+      - ./generated:/app/generated
+    restart: unless-stopped
