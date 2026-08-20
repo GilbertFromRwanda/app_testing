@@ -4,6 +4,12 @@ let currentRunId = null;
 
 const el = (id) => document.getElementById(id);
 
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
 // ---------- Tabs ----------
 document.querySelectorAll('.tab-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
@@ -194,6 +200,7 @@ function collectConfig() {
     sleepMax: el('sleepMax').value,
     auth: getAuth(),
     headers: getHeaders(),
+    spoofClientIp: el('spoofClientIp').checked,
     requests: getRequests(),
   };
 }
@@ -688,6 +695,72 @@ function buildResultsCharts(summary) {
   return row;
 }
 
+// Prominent total/failed/failure-rate tiles, sourced straight from
+// http_reqs (the actual request count k6 sent) and http_req_failed (whose
+// "passes" field — a k6 naming quirk — is the count flagged as failed).
+function buildTopStats(metrics) {
+  const totalReqs = metrics.http_reqs && metrics.http_reqs.count;
+  if (totalReqs === undefined) return null;
+  const failedCount = (metrics.http_req_failed && metrics.http_req_failed.passes) || 0;
+  const pct = totalReqs ? (failedCount / totalReqs) * 100 : 0;
+
+  const row = document.createElement('div');
+  row.className = 'top-stats';
+  row.innerHTML = `
+    <div class="top-stat">
+      <div class="top-stat-value">${totalReqs.toLocaleString()}</div>
+      <div class="top-stat-label">Total requests</div>
+    </div>
+    <div class="top-stat ${failedCount ? 'bad' : 'good'}">
+      <div class="top-stat-value">${failedCount.toLocaleString()}</div>
+      <div class="top-stat-label">Failed requests</div>
+    </div>
+    <div class="top-stat ${failedCount ? 'bad' : 'good'}">
+      <div class="top-stat-value">${pct.toFixed(2)}%</div>
+      <div class="top-stat-label">Failure rate</div>
+    </div>
+  `;
+  return row;
+}
+
+// Per-request breakdown: each configured request generates one named check
+// ("GET /path status ok"), so root_group.checks tells us exactly which
+// request(s) are failing and how often — worst offenders first. The
+// concrete reason for each failure (status code / transport error / body
+// snippet) is printed live to the Log tab by the generated script.
+function buildRequestBreakdown(summary) {
+  const checks = summary.root_group && summary.root_group.checks;
+  if (!checks || !Object.keys(checks).length) return null;
+
+  const rows = Object.values(checks)
+    .map((c) => {
+      const total = (c.passes || 0) + (c.fails || 0);
+      return { name: c.name, fails: c.fails || 0, total, failPct: total ? ((c.fails || 0) / total) * 100 : 0 };
+    })
+    .sort((a, b) => b.failPct - a.failPct || b.fails - a.fails);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'request-breakdown';
+  wrap.innerHTML = '<p class="chart-title">Requests</p>';
+  for (const r of rows) {
+    const row = document.createElement('div');
+    row.className = `req-breakdown-row ${r.fails ? 'bad' : 'good'}`;
+    row.innerHTML = `
+      <span class="req-breakdown-name">${escapeHtml(r.name)}</span>
+      <div class="duration-track"><div class="duration-fill${r.fails ? ' fail' : ''}" style="width:${Math.max(2, r.failPct).toFixed(1)}%"></div></div>
+      <span class="req-breakdown-val">${r.fails} / ${r.total} failed</span>
+    `;
+    wrap.appendChild(row);
+  }
+  if (rows.some((r) => r.fails)) {
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = 'For the reason each request failed (status code, connection error, response body), check the Live log tab — failures are logged there as they happen.';
+    wrap.appendChild(hint);
+  }
+  return wrap;
+}
+
 let lastSummary = null;
 
 function renderResults(summary) {
@@ -701,6 +774,9 @@ function renderResults(summary) {
   }
 
   container.innerHTML = '';
+
+  const topStats = buildTopStats(summary.metrics);
+  if (topStats) container.appendChild(topStats);
 
   const thresholds = collectThresholds(summary);
   if (thresholds.length) {
@@ -725,6 +801,9 @@ function renderResults(summary) {
 
   const charts = buildResultsCharts(summary);
   if (charts) container.appendChild(charts);
+
+  const breakdown = buildRequestBreakdown(summary);
+  if (breakdown) container.appendChild(breakdown);
 
   const grid = document.createElement('div');
   grid.className = 'metric-grid';
