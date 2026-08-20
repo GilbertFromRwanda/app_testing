@@ -119,6 +119,11 @@
       <legend>Extra headers (sent on every request)</legend>
       <div id="headersEditor" class="rows"></div>
       <button type="button" id="addHeader" class="btn-secondary small">+ Add header</button>
+      <label class="checkbox-row">
+        <input type="checkbox" id="spoofClientIp" />
+        Simulate a distinct client IP per virtual user (adds <code>X-Forwarded-For</code> / <code>X-Real-IP</code> headers)
+      </label>
+      <p class="hint">Only affects targets that trust a reverse proxy and read the client IP from these headers (e.g. NestJS with <code>trust proxy</code> on). Doesn't spoof the real network-level source IP — use it to load-test IP-scoped rate limiting realistically, not to bypass a target you don't control.</p>
     </fieldset>
 
     <fieldset>
