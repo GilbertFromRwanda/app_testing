@@ -1,5 +1,5 @@
 {
-  "name": "k6-dynamic-test-ui",
+  "name": "gil-testing",
   "version": "1.0.0",
   "private": true,
   "description": "UI to configure, run, and view results of k6 load tests",

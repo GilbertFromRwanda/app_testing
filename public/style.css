@@ -63,6 +63,13 @@ body {
 
 label { display: block; font-size: 0.85rem; color: var(--text-dim); margin: 0.6rem 0 0.3rem; }
 label.inline { display: inline-block; margin-right: 1rem; color: var(--text); }
+label.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text);
+}
+label.checkbox-row input[type="checkbox"] { width: auto; }
 
 input[type="text"], input[type="number"], select, textarea {
   width: 100%;
@@ -185,6 +192,42 @@ button { font-family: inherit; }
 
 .results-toolbar { display: flex; justify-content: flex-end; margin-bottom: 0.6rem; }
 .results-summary { display: flex; flex-direction: column; gap: 1rem; }
+
+.top-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.6rem;
+}
+.top-stat {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+  text-align: center;
+}
+.top-stat-value { font-size: 1.6rem; font-weight: 600; }
+.top-stat-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em; margin-top: 0.2rem; }
+.top-stat.good .top-stat-value { color: var(--accent-2); }
+.top-stat.bad .top-stat-value { color: var(--danger); }
+
+.request-breakdown {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+}
+.req-breakdown-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 2fr auto;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.4rem 0;
+  font-size: 0.82rem;
+}
+.req-breakdown-row .req-breakdown-name { color: var(--text-dim); overflow-wrap: anywhere; }
+.req-breakdown-row.bad .req-breakdown-val { color: var(--danger); }
+.req-breakdown-row .req-breakdown-val { text-align: right; font-variant-numeric: tabular-nums; }
+.duration-fill.fail { background: var(--danger); }
 
 .threshold-list { display: flex; flex-direction: column; gap: 0.4rem; }
 .threshold-row {
