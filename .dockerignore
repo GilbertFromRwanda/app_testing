@@ -1,6 +1,7 @@
 node_modules
 server/node_modules
 generated
+go-runner
 .git
 .gitignore
 *.log

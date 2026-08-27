@@ -1,13 +1,46 @@
 name: gil-testing
 
+# Two loosely-coupled services that share only ./generated:
+#   node-runner  the web UI + k6 runner (writes generated scripts)
+#   go-runner    watches ./generated and `go run`s the native Go exports
 services:
-  gil-testing:
+  node-runner:
     build: .
-    container_name: gil-testing
+    container_name: gil-testing-node
     ports:
       - "4600:4600"
     environment:
       - PORT=4600
+      # Real source IPs for `k6 run --local-ips` (rotates the TCP source IP per
+      # connection). Needs the addresses to actually be assigned to this host
+      # AND the container to see them — uncomment network_mode below on Linux,
+      # or use a macvlan network. The UI's "Source IPs" field overrides this.
+      # - K6_LOCAL_IPS=10.0.0.11,10.0.0.12,10.0.0.13
+    # network_mode: host
     volumes:
       - ./generated:/app/generated
+    restart: unless-stopped
+
+  go-runner:
+    build: ./go-runner
+    container_name: gil-testing-go
+    # Optional per-container overrides — every generated script already bakes in
+    # its own values, so this block is commented out by default. Uncomment
+    # `environment:` and any lines under it to use them:
+    #
+    # environment:
+    #   # Local source IPs the program binds outgoing connections to
+    #   # (net.Dialer.LocalAddr), round-robin. Only works if these addresses are
+    #   # actually assigned to the host AND the container can see them — uncomment
+    #   # network_mode below on Linux, or use a macvlan network. "auto" = every
+    #   # IPv4 already on the container's NIC; unassigned addresses are skipped.
+    #   - LOCAL_IPS=10.0.0.11,10.0.0.12,10.0.0.13
+    #   - LOCAL_IPS_NO_VERIFY=1   # bind the list as-is (macvlan / IP_FREEBIND)
+    #   - TARGET_URL=https://host # retarget without regenerating the script
+    #   - RUN_SECONDS=60
+    #   - PEAK=50
+    #   - MAX_VUS=5000            # hard cap regardless of the script's own value
+    # network_mode: host
+    volumes:
+      - ./generated:/generated
     restart: unless-stopped

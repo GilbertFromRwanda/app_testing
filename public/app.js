@@ -175,6 +175,7 @@ function applyPreset(type) {
   el('thP95').value = p.thresholds?.p95 ?? '';
   el('thFailRate').value = p.thresholds?.failRate ?? '';
   el('thMinReq').value = p.thresholds?.minRequests ?? '';
+  el('thMaxReq').value = p.thresholds?.maxRequests ?? '';
   el('sleepMin').value = p.sleepMin ?? 1;
   el('sleepMax').value = p.sleepMax ?? 2;
 }
@@ -186,6 +187,7 @@ function collectConfig() {
   const mode = document.querySelector('input[name="mode"]:checked').value;
   return {
     testType: el('testType').value,
+    format: el('outputFormat').value,
     target: el('target').value.trim(),
     mode,
     stages: mode === 'stages' ? getStages() : [],
@@ -195,12 +197,14 @@ function collectConfig() {
       p95: el('thP95').value,
       failRate: el('thFailRate').value,
       minRequests: el('thMinReq').value,
+      maxRequests: el('thMaxReq').value,
     },
     sleepMin: el('sleepMin').value,
     sleepMax: el('sleepMax').value,
     auth: getAuth(),
     headers: getHeaders(),
     spoofClientIp: el('spoofClientIp').checked,
+    localIps: el('localIps').value.trim(),
     requests: getRequests(),
   };
 }
@@ -407,6 +411,31 @@ function renderProfileChart(config) {
   hitArea.addEventListener('touchend', onLeave);
 }
 
+// ---------- Output format (k6 script vs. native Go export) ----------
+function refreshOutputFormat() {
+  const go = el('outputFormat').value === 'go';
+  el('runBtn').textContent = go ? 'Send to go-runner' : 'Run test';
+  el('goExportHint').classList.toggle('hidden', !go);
+}
+el('outputFormat').addEventListener('change', refreshOutputFormat);
+
+el('downloadBtn').addEventListener('click', () => {
+  const text = el('scriptPreview').textContent || '';
+  if (!text.trim() || text.startsWith('// Click')) {
+    alert('Preview a script first.');
+    return;
+  }
+  const go = el('outputFormat').value === 'go';
+  const blob = new Blob([text], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = go ? 'spoof_test.go' : 'loadtest.js';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
 // ---------- Preview ----------
 el('previewBtn').addEventListener('click', async () => {
   if (!requireTarget()) return;
@@ -500,6 +529,10 @@ el('runBtn').addEventListener('click', async () => {
     return;
   }
 
+  // Go runs execute in the go-runner container; the node service tails their
+  // log file and re-streams it over the same SSE channel as k6, so the wiring
+  // below is identical — only the end-of-run results view differs.
+  const isGo = data.kind === 'go';
   currentRunId = data.runId;
   el('scriptPreview').textContent = `// running ${data.scriptPath}\n\n` + el('scriptPreview').textContent;
   switchTab('log');
@@ -530,8 +563,17 @@ el('runBtn').addEventListener('click', async () => {
     statusEl.textContent = passed ? 'Finished — thresholds passed' : `Finished — exit code ${payload.code} (check thresholds/errors)`;
     statusEl.className = `status ${passed ? 'done-pass' : 'done-fail'}`;
 
-    renderResults(payload.summary);
-    switchTab('results');
+    if (isGo || payload.kind === 'go') {
+      // The Go runner prints its own SUMMARY block to the log rather than a k6
+      // summary export, so there are no charts to render — keep the user on the
+      // log, where that block just landed.
+      el('resultsSummary').innerHTML =
+        '<p class="hint">The Go runner reports its results as a <code>==== SUMMARY ====</code> block at the end of the <strong>Live log</strong> tab (requests, failure rate, p95, and any breached thresholds). It does not produce the k6 metrics export, so there are no charts here.</p>';
+      el('copyResultsBtn').classList.add('hidden');
+    } else {
+      renderResults(payload.summary);
+      switchTab('results');
+    }
   });
 
   es.onerror = () => {
@@ -849,4 +891,5 @@ el('copyResultsBtn').addEventListener('click', async () => {
 // ---------- Init ----------
 setStages([{ duration: '2m', target: 20 }, { duration: '5m', target: 100 }, { duration: '2m', target: 0 }]);
 setRequests([{ method: 'GET', path: '' }]);
+refreshOutputFormat();
 loadPresets();

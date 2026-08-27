@@ -27,8 +27,15 @@ function buildOptions(config) {
   if (t.failRate !== undefined && t.failRate !== null && t.failRate !== '') {
     thresholdLines.push(`    http_req_failed: ['rate<${Number(t.failRate)}']`);
   }
+  const reqCountConds = [];
   if (t.minRequests !== undefined && t.minRequests !== null && t.minRequests !== '') {
-    thresholdLines.push(`    http_reqs: ['count>${Number(t.minRequests)}']`);
+    reqCountConds.push(`'count>${Number(t.minRequests)}'`);
+  }
+  if (t.maxRequests !== undefined && t.maxRequests !== null && t.maxRequests !== '') {
+    reqCountConds.push(`'count<${Number(t.maxRequests)}'`);
+  }
+  if (reqCountConds.length) {
+    thresholdLines.push(`    http_reqs: [${reqCountConds.join(', ')}]`);
   }
   if (thresholdLines.length) {
     lines.push('  thresholds: {');
@@ -64,30 +71,54 @@ function buildAuthHeaderEntries(config) {
     entries.push(`    ${jsString(name)}: \`Bearer \${__authToken}\`,`);
   }
 
-  if (config.spoofClientIp) {
-    entries.push(`    'X-Forwarded-For': __clientIp,`);
-    entries.push(`    'X-Real-IP': __clientIp,`);
-  }
-
   return entries;
 }
 
-// Only meaningful against a target that trusts a reverse proxy and reads
-// the client IP from these headers (e.g. Express/NestJS with `trust proxy`
-// on) — this can't and doesn't spoof the real TCP source IP. One random IP
-// is generated per VU (not per request) so it behaves like one simulated
-// client keeping a stable identity across its own iterations.
+const REALISTIC_USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1.2 Mobile/15E148 Safari/604.1',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1.2 Safari/605.1.15',
+];
+
+// Emitted once when "distinct client per request" is on. Provides a fresh
+// random public-looking IPv4 and a rotating browser User-Agent, so each
+// request looks like it came from a different real client — this is what
+// spreads traffic across IP-keyed rate limiters (e.g. @nestjs/throttler).
+// Only has any effect when the target sits behind a proxy it trusts and
+// derives the client IP from these headers; it does not change the real
+// TCP source IP.
 function buildClientIpPrelude(config) {
   if (!config.spoofClientIp) return null;
   return [
     'function __randomIp() {',
-    '  return `${Math.floor(Math.random() * 223) + 1}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`;',
+    '  return `${Math.floor(Math.random() * 223) + 1}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 254) + 1}`;',
     '}',
-    'let __clientIp;',
+    'const __userAgents = [',
+    ...REALISTIC_USER_AGENTS.map((ua) => `  ${jsString(ua)},`),
+    '];',
+    'function __randomUserAgent() {',
+    '  return __userAgents[Math.floor(Math.random() * __userAgents.length)];',
+    '}',
   ].join('\n');
 }
 
-function buildRequest(req, index, targetVar, authHeaderEntries) {
+// The browser-like header block attached to each request (and the login) when
+// client spoofing is on. `ipExpr` is the JS expression holding this request's
+// IP (a per-request const), reused across both IP headers so they agree.
+function realisticClientHeaderLines(indent, ipExpr) {
+  return [
+    `${indent}'X-Forwarded-For': ${ipExpr},`,
+    `${indent}'X-Real-IP': ${ipExpr},`,
+    `${indent}'User-Agent': __randomUserAgent(),`,
+    `${indent}'Accept-Language': 'en-US,en;q=0.9',`,
+    `${indent}'Accept-Encoding': 'gzip, deflate, br',`,
+    `${indent}'Cache-Control': 'no-cache',`,
+  ];
+}
+
+function buildRequest(req, index, targetVar, authHeaderEntries, spoofClientIp) {
   const method = (req.method || 'GET').toUpperCase();
   const varName = `res${index}`;
   const path = req.path || '';
@@ -100,6 +131,9 @@ function buildRequest(req, index, targetVar, authHeaderEntries) {
   const headerLines = [];
   if (hasBody) headerLines.push(`    'Content-Type': 'application/json',`);
   headerLines.push(...authHeaderEntries);
+  if (spoofClientIp) {
+    headerLines.push(...realisticClientHeaderLines('    ', `__ip${index}`));
+  }
 
   const optsLines = [];
   if (headerLines.length) {
@@ -107,7 +141,13 @@ function buildRequest(req, index, targetVar, authHeaderEntries) {
     optsLines.push(...headerLines);
     optsLines.push('    },');
   }
-  optsLines.push(`    tags: { name: ${jsString(nameTag)} },`);
+  const tagEntries = [`name: ${jsString(nameTag)}`];
+  if (spoofClientIp) tagEntries.push(`ip: __ip${index}`);
+  optsLines.push(`    tags: { ${tagEntries.join(', ')} },`);
+
+  if (spoofClientIp) {
+    lines.push(`  const __ip${index} = __randomIp();`);
+  }
 
   if (hasBody) {
     const body = req.body && req.body.trim() ? req.body.trim() : '{}';
@@ -164,13 +204,14 @@ function buildLoginPrelude(config) {
   const body = auth.loginBody && auth.loginBody.trim() ? auth.loginBody.trim() : '{}';
 
   const ipHeaderLines = config.spoofClientIp
-    ? [`      'X-Forwarded-For': __clientIp,`, `      'X-Real-IP': __clientIp,`]
+    ? realisticClientHeaderLines('      ', '__loginIp')
     : [];
 
   const lines = [];
   lines.push('let __sessionReady = false;');
   if (auth.tokenField) lines.push('let __authToken;');
   lines.push('function __login() {');
+  if (config.spoofClientIp) lines.push('  const __loginIp = __randomIp();');
   if (method === 'GET') {
     lines.push(`  const res = http.get(${url}, {`);
     if (ipHeaderLines.length) {
@@ -210,8 +251,8 @@ function generateScript(config) {
   const sleepMax = Number(config.sleepMax ?? 2);
 
   const authHeaderEntries = buildAuthHeaderEntries(config);
-  const loginPrelude = buildLoginPrelude(config);
   const clientIpPrelude = buildClientIpPrelude(config);
+  const loginPrelude = buildLoginPrelude(config);
 
   const parts = [];
   parts.push(`// Generated by k6 Dynamic Test UI — ${new Date().toISOString()}`);
@@ -222,24 +263,25 @@ function generateScript(config) {
   parts.push(buildOptions(config));
   parts.push('');
   parts.push(`const BASE_URL = ${jsString(config.target.trim())};`);
-  if (loginPrelude) {
-    parts.push('');
-    parts.push(loginPrelude);
-  }
   if (clientIpPrelude) {
     parts.push('');
     parts.push(clientIpPrelude);
   }
+  if (loginPrelude) {
+    parts.push('');
+    parts.push(loginPrelude);
+  }
   parts.push('');
   parts.push('export default function () {');
-  if (clientIpPrelude) {
-    parts.push('  if (!__clientIp) __clientIp = __randomIp();');
-  }
   if (loginPrelude) {
     parts.push('  if (!__sessionReady) __login();');
     parts.push('');
   }
-  parts.push(requests.map((r, i) => buildRequest(r, i, 'BASE_URL', authHeaderEntries)).join('\n\n'));
+  parts.push(
+    requests
+      .map((r, i) => buildRequest(r, i, 'BASE_URL', authHeaderEntries, config.spoofClientIp))
+      .join('\n\n')
+  );
   parts.push('');
   if (sleepMax > sleepMin) {
     parts.push(`  sleep(Math.random() * ${(sleepMax - sleepMin).toFixed(2)} + ${sleepMin.toFixed(2)});`);
@@ -252,4 +294,4 @@ function generateScript(config) {
   return parts.join('\n');
 }
 
-module.exports = { generateScript };
+module.exports = { generateScript, REALISTIC_USER_AGENTS };
