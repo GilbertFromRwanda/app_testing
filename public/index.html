@@ -50,6 +50,11 @@
           <label>Duration <input id="duration" type="text" value="1m" /></label>
         </div>
       </div>
+
+      <label>Source IPs — <code>k6 --local-ips</code> / Go <code>LOCAL_IPS</code>
+        <input id="localIps" type="text" placeholder="10.0.0.11,10.0.0.12  or  10.0.0.20-10.0.0.40  or  10.0.0.0/28" />
+      </label>
+      <p class="hint">Rotates the real TCP source IP per connection. Used by <strong>both</strong> the k6 and Go outputs (the Go program binds each connection via <code>net.Dialer.LocalAddr</code>). Only works if the machine (or container, via <code>network_mode: host</code> / macvlan) actually owns these addresses — configure them as NIC aliases first (Windows: <code>New-NetIPAddress</code>; Linux: <code>ip addr add</code>). Leave blank to send from the default IP.</p>
     </fieldset>
 
     <fieldset>
@@ -58,6 +63,7 @@
         <label>p95 latency (ms) <input id="thP95" type="number" placeholder="300" /></label>
         <label>Max fail rate (0-1) <input id="thFailRate" type="number" step="0.01" placeholder="0.05" /></label>
         <label>Min requests <input id="thMinReq" type="number" placeholder="" /></label>
+        <label>Max requests <input id="thMaxReq" type="number" placeholder="" /></label>
       </div>
     </fieldset>
 
@@ -121,9 +127,9 @@
       <button type="button" id="addHeader" class="btn-secondary small">+ Add header</button>
       <label class="checkbox-row">
         <input type="checkbox" id="spoofClientIp" />
-        Simulate a distinct client IP per virtual user (adds <code>X-Forwarded-For</code> / <code>X-Real-IP</code> headers)
+        Make each request look like a distinct browser client (random <code>X-Forwarded-For</code> / <code>X-Real-IP</code> + rotating <code>User-Agent</code> and browser headers)
       </label>
-      <p class="hint">Only affects targets that trust a reverse proxy and read the client IP from these headers (e.g. NestJS with <code>trust proxy</code> on). Doesn't spoof the real network-level source IP — use it to load-test IP-scoped rate limiting realistically, not to bypass a target you don't control.</p>
+      <p class="hint">Spreads traffic across IP-keyed rate limiters (e.g. NestJS <code>ThrottlerGuard</code>) so a per-IP limit isn't hit during the test, and blends the load in with normal browser traffic. The IP part only works if the target is behind a reverse proxy it trusts and derives the client IP from these headers (Express/NestJS with <code>trust proxy</code> enabled). It does not change the real network-level source IP. Each request is also tagged with its IP so the Results tab can break traffic down per client.</p>
     </fieldset>
 
     <fieldset>
@@ -133,10 +139,18 @@
     </fieldset>
 
     <div class="actions">
+      <label class="inline">Output
+        <select id="outputFormat">
+          <option value="k6" selected>k6 (JavaScript)</option>
+          <option value="go">Go — native source IP</option>
+        </select>
+      </label>
       <button type="button" id="previewBtn" class="btn-secondary">Preview script</button>
+      <button type="button" id="downloadBtn" class="btn-secondary">Download</button>
       <button type="button" id="runBtn" class="btn-primary">Run test</button>
       <button type="button" id="stopBtn" class="btn-danger hidden">Stop</button>
     </div>
+    <p id="goExportHint" class="hint hidden">The Go output runs in the separate <code>go-runner</code> container. <strong>Send to go-runner</strong> writes the program to <code>./generated</code>, its watcher runs it with <code>go run</code>, and the output streams back to the <strong>Live log</strong> tab here (the <strong>Stop</strong> button aborts it). The run ends with a <code>==== SUMMARY ====</code> block in that log instead of the k6 charts. Or hit <strong>Download</strong> to run it by hand: <code>go run &lt;file&gt;.go</code> (Go 1.21+, stdlib-only, no modules). It rotates the real TCP source IP via <code>net.Dialer.LocalAddr</code>, so set <strong>Source IPs</strong> to addresses this host actually owns (or the literal <code>auto</code> for every address already on its NIC). Addresses that aren't locally assigned are checked and skipped before the run, not failed per request.</p>
   </section>
 
   <section class="panel output-panel">
