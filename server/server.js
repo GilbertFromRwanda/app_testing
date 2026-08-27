@@ -6,7 +6,14 @@ const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 
 const { generateScript } = require('./scriptGenerator');
+const { generateGoScript } = require('./goGenerator');
 const { presets } = require('./presets');
+
+// Comma-separated local source IPs / ranges / CIDRs passed to `k6 run
+// --local-ips`. k6 round-robins outgoing connections across them, so this only
+// does anything when the host (or container, via host networking / macvlan)
+// actually owns those addresses. A per-run value from the UI takes precedence.
+const K6_LOCAL_IPS = process.env.K6_LOCAL_IPS || '';
 
 const app = express();
 const PORT = process.env.PORT || 4600;
@@ -27,17 +34,113 @@ app.get('/api/presets', (req, res) => {
 
 app.post('/api/generate', (req, res) => {
   try {
-    const script = generateScript(req.body || {});
-    res.json({ script });
+    const body = req.body || {};
+    const isGo = body.format === 'go';
+    const script = isGo ? generateGoScript(body) : generateScript(body);
+    res.json({ script, format: isGo ? 'go' : 'k6' });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
+// Native Go runs are executed by the separate go-runner service, not here — the
+// two share only ./generated. We write the script (+ its config) there, then
+// tail the <id>.log file go-runner streams into and re-broadcast it over the
+// same SSE channel the k6 path uses, so the UI shows live output either way.
+const GO_POLL_MS = 500;
+
+function startGoRun(runId, relScriptPath) {
+  const logPath = path.join(GENERATED_DIR, `${runId}.log`);
+  const donePath = path.join(GENERATED_DIR, `${runId}.done`);
+
+  const emitter = new EventEmitter();
+  const state = {
+    emitter, logs: [], status: 'running', exitCode: null,
+    summary: null, proc: null, kind: 'go', timer: null,
+  };
+  runs.set(runId, state);
+
+  const pushLog = (text) => {
+    state.logs.push(text);
+    state.emitter.emit('log', text);
+  };
+
+  let offset = 0;
+  const drain = () => {
+    if (!fs.existsSync(logPath)) return;
+    const size = fs.statSync(logPath).size;
+    if (size < offset) offset = 0; // truncated / rewritten
+    if (size <= offset) return;
+    const fd = fs.openSync(logPath, 'r');
+    try {
+      const buf = Buffer.alloc(size - offset);
+      fs.readSync(fd, buf, 0, buf.length, offset);
+      offset = size;
+      pushLog(buf.toString('utf8'));
+    } finally {
+      fs.closeSync(fd);
+    }
+  };
+
+  const finish = (code) => {
+    if (state.status === 'done') return;
+    clearInterval(state.timer);
+    state.timer = null;
+    state.status = 'done';
+    state.exitCode = code;
+    state.emitter.emit('done', { code, summary: null, kind: 'go' });
+    setTimeout(() => runs.delete(runId), 30 * 60 * 1000);
+  };
+
+  pushLog(`[node] wrote ${relScriptPath} — waiting for go-runner to pick it up…\n`);
+
+  let sawLog = false;
+  state.timer = setInterval(() => {
+    try {
+      if (!sawLog && fs.existsSync(logPath)) {
+        sawLog = true;
+        pushLog(`[node] go-runner started ${runId}.go\n`);
+      }
+      drain();
+      if (fs.existsSync(donePath)) {
+        drain();
+        const raw = fs.readFileSync(donePath, 'utf8').trim();
+        const numeric = /^-?\d+$/.test(raw);
+        if (!numeric) pushLog(`\n[go-runner] ${raw}\n`);
+        finish(numeric ? Number(raw) : 1);
+      }
+    } catch (e) {
+      // races with go-runner writing these files are expected — retry next tick
+    }
+  }, GO_POLL_MS);
+}
+
 app.post('/api/run', (req, res) => {
+  const config = req.body || {};
+
+  if (config.format === 'go') {
+    let goScript;
+    try {
+      goScript = generateGoScript(config);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    const runId = crypto.randomBytes(6).toString('hex');
+    const goPath = path.join(GENERATED_DIR, `${runId}.go`);
+    fs.writeFileSync(goPath, goScript, 'utf8');
+    fs.writeFileSync(
+      path.join(GENERATED_DIR, `${runId}.config.json`),
+      JSON.stringify(config, null, 2),
+      'utf8'
+    );
+    const rel = path.relative(path.join(__dirname, '..'), goPath);
+    startGoRun(runId, rel);
+    return res.json({ runId, scriptPath: rel, kind: 'go' });
+  }
+
   let script;
   try {
-    script = generateScript(req.body || {});
+    script = generateScript(config);
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
@@ -47,11 +150,18 @@ app.post('/api/run', (req, res) => {
   const summaryPath = path.join(GENERATED_DIR, `${runId}-summary.json`);
   fs.writeFileSync(scriptPath, script, 'utf8');
 
+  // IPv4/IPv6 addresses, ranges and CIDRs only — this reaches a shell (spawn
+  // with shell:true), so keep it to the character set k6 actually accepts.
+  const localIps = (config.localIps || K6_LOCAL_IPS || '').trim().replace(/[^0-9a-fA-F.,:/ -]/g, '');
+  const k6Args = ['run', '--summary-export', summaryPath];
+  if (localIps) k6Args.push(`--local-ips=${localIps}`);
+  k6Args.push(scriptPath);
+
   const emitter = new EventEmitter();
   const state = { emitter, logs: [], status: 'running', exitCode: null, summary: null, proc: null };
   runs.set(runId, state);
 
-  const proc = spawn('k6', ['run', '--summary-export', summaryPath, scriptPath], {
+  const proc = spawn('k6', k6Args, {
     cwd: GENERATED_DIR,
     shell: true,
   });
@@ -125,9 +235,16 @@ app.get('/api/run/:id/stream', (req, res) => {
 
 app.post('/api/run/:id/stop', (req, res) => {
   const state = runs.get(req.params.id);
-  if (!state || !state.proc || state.status !== 'running') {
+  if (!state || state.status !== 'running') {
     return res.status(404).json({ error: 'No running test with that id' });
   }
+  // Go runs live in the other container — drop a .stop marker go-runner watches
+  // for and kills the run on. The tailer ends when it sees <id>.done.
+  if (state.kind === 'go') {
+    fs.writeFileSync(path.join(GENERATED_DIR, `${req.params.id}.stop`), '1', 'utf8');
+    return res.json({ stopped: true });
+  }
+  if (!state.proc) return res.status(404).json({ error: 'No running test with that id' });
   state.proc.kill();
   res.json({ stopped: true });
 });
